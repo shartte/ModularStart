@@ -1,0 +1,21 @@
+plugins {
+    id "net.neoforged.gradle.userdev"
+}
+
+group = 'org.example'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+dependencies {
+    implementation "net.neoforged:neoforge:20.4.60-beta"
+}
+
+runs {
+    client {
+    }
+}
