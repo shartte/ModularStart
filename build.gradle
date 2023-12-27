@@ -1,21 +1,116 @@
+import java.lang.module.FindException
+import java.lang.module.ModuleFinder
+import java.lang.module.ModuleReference
+
 plugins {
     id "net.neoforged.gradle.userdev"
 }
 
-group = 'org.example'
-version = '1.0-SNAPSHOT'
-
 repositories {
-    mavenCentral()
+    mavenLocal()
 }
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+// Force use of versions found in local Maven
+configurations.runtimeClasspath.resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+    if (details.requested.group == 'net.neoforged.fancymodloader') {
+        details.useVersion '2.0.7'
+    } else if (details.requested.group == 'cpw.mods' && details.requested.name == "modlauncher") {
+        details.useVersion '999.0.0'
+    } else if (details.requested.group == 'org.spongepowered' && details.requested.name == "mixin") {
+        details.useVersion '0.8.6'
+    }
+}
 
 dependencies {
     implementation "net.neoforged:neoforge:20.4.60-beta"
 }
 
 runs {
-    client {
+    templateRun {
+        configure("client")
+    }
+}
+
+afterEvaluate {
+    // Get the UserDev runtime
+    var nfRuntime = userDevRuntime.getRuntimes().get().values().first()
+
+    var run = runs.templateRun
+    nfRuntime.configureRun(run)
+
+    var jvmArguments = new ArrayList<>(run.getJvmArguments().get())
+    var systemProperties = new HashMap<>(run.getSystemProperties().get())
+    var programArguments = run.getProgramArguments().get()
+    var environment = run.getEnvironmentVariables().get()
+    var mainClass = run.mainClass.get()
+
+    jvmArguments = jvmArguments + ["--add-opens", "java.base/java.lang=cpw.mods.modlauncher"]
+
+    // Find and remove current module path
+    List<String> modulePath = []
+    for (i in 0..<jvmArguments.size()) {
+        if ((jvmArguments[i] == "-p" || jvmArguments[i] == "--module-path") && i + 1 < jvmArguments.size()) {
+            modulePath.addAll(Arrays.asList(jvmArguments[i + 1].split(File.pathSeparator)))
+            jvmArguments.removeAt(i + 1)
+            jvmArguments.removeAt(i)
+        }
+    }
+
+    // Expand the module-classpath by moving modules from the runtimeClasspath over
+    def bootModuleBlacklist = Set.of("neoforge", "client", "mixinextras.neoforge");
+
+    nfRuntime.additionalUserDevDependencies.shouldResolveConsistentlyWith(configurations.runtimeClasspath)
+    nfRuntime.minecraftDependenciesConfiguration.shouldResolveConsistentlyWith(configurations.runtimeClasspath)
+
+    def runtimeJars = nfRuntime.additionalUserDevDependencies.resolve() + nfRuntime.minecraftDependenciesConfiguration.resolve()
+    println("Runtime JARs: " + runtimeJars.collect { it.name })
+
+    for (def jarFile in runtimeJars) {
+        // Infer module name from jar-file
+        var mf = ModuleFinder.of(jarFile.toPath())
+        try {
+            var mrefs = mf.findAll();
+            if (!mrefs.isEmpty()) {
+                ModuleReference mref = mrefs.first();
+                var moduleName = mref.descriptor().name()
+                // We blacklist the Minecraft jars since they need to be transformed via the GAME layer
+                if (!bootModuleBlacklist.contains(moduleName)) {
+                    modulePath.add(jarFile.getAbsolutePath())
+                }
+            }
+        } catch (FindException ignored) {
+            // Not a module. Might be a ZIP file
+        }
+    }
+    modulePath.add(jar.archiveFile.get().asFile.absolutePath)
+
+    // Remove path to LCP
+    // systemProperties.remove("legacyClassPath.file")
+    systemProperties.remove("ignoreList")
+    systemProperties.remove("fml.pluginLayerLibraries") // Not needed anymore
+    systemProperties.remove("fml.gameLayerLibraries") // Not needed anymore
+    systemProperties.remove("mergeModules") // Not needed anymore apparently
+
+    println("Module Path: " + modulePath)
+    println("JVM Arguments: " + jvmArguments)
+    println("System Properties: " + systemProperties)
+    println("Environment: " + environment)
+    println("Program Arguments: " + programArguments)
+
+    tasks.register("runModular", JavaExec) {
+        it.workingDir = "runs"
+        it.classpath = configurations.runtimeClasspath
+        it.mainClass = "cpw.mods.modlauncher.ModularLauncher"
+        it.jvmArgs = [
+                "-p",
+                modulePath.join(File.pathSeparator),
+                *jvmArguments
+        ]
+        it.systemProperties = systemProperties
+        it.args = programArguments
+        it.inputs.file(jar.archiveFile)
+        it.inputs.file(writeMinecraftClasspathTemplateRun.output)
     }
 }
